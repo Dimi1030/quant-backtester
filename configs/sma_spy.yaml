@@ -1,0 +1,34 @@
+# Klassischer Trendfolger: 50/200-Tage-Kreuzung auf dem S&P 500
+title: SMA 50/200 auf SPY
+symbols: [SPY]
+benchmark: SPY
+start: 2005-01-01
+
+strategy:
+  name: sma_cross
+  params: {fast: 50, slow: 200, kind: sma}
+  grid:
+    fast: [10, 20, 50, 100]
+    slow: [50, 100, 150, 200, 250]
+
+sizing:
+  name: equal
+
+config:
+  initial_capital: 100000
+  execution: open          # Signal am Schluss, Ausführung zur nächsten Eröffnung
+  integer_shares: true
+  rebalance_threshold: 0.02
+  costs:
+    commission_bps: 0      # prozentuale Gebühr
+    commission_fixed: 1.0  # Fixbetrag je Order
+    slippage_bps: 5        # inkl. halber Spread
+
+robustness:
+  grid: true
+  walk_forward: {train_years: 4, test_years: 1, objective: sharpe}
+  monte_carlo: {n_sims: 2000, block: 21}
+  pbo: {n_blocks: 10}
+  cost_sensitivity: true
+
+report: reports/sma_spy.html

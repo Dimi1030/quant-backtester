@@ -1,0 +1,31 @@
+# Rotation über Anlageklassen: Aktien USA, Welt, Nasdaq, Anleihen, Gold.
+# Monatlich die zwei stärksten Werte mit positivem Momentum, volatilitätsgewichtet.
+title: Dual Momentum über Anlageklassen
+symbols: [SPY, EUNL.DE, QQQ, TLT, IEF, GLD]
+benchmark: SPY
+start: 2008-01-01
+
+strategy:
+  name: xsmom
+  params: {lookback: 252, skip: 21, top: 2, abs_filter: true}
+  grid:
+    lookback: [63, 126, 189, 252]
+    skip: [0, 21]
+    top: [1, 2, 3]
+
+sizing:
+  name: vol_target
+  params: {target: 0.12, lookback: 60, max_weight: 0.6, max_gross: 1.0, slot: active}
+
+config:
+  initial_capital: 100000
+  execution: open
+  rebalance_threshold: 0.05
+  costs: {commission_bps: 5, commission_min: 1, commission_fixed: 0, slippage_bps: 5}
+
+robustness:
+  walk_forward: {train_years: 5, test_years: 1, objective: sharpe}
+  monte_carlo: {n_sims: 2000, block: 21}
+  pbo: {n_blocks: 10}
+
+report: reports/dual_momentum.html

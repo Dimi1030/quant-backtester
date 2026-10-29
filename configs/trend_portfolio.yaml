@@ -1,0 +1,29 @@
+# Trendfolge-Portfolio: Donchian-Ausbrüche über Aktien, Anleihen und Gold mit Volatilitätsziel
+title: Donchian-Trendfolge Multi-Asset
+symbols: [SPY, QQQ, EUNL.DE, EXS1.DE, TLT, GLD]
+benchmark: EUNL.DE
+start: 2010-01-01
+
+strategy:
+  name: donchian
+  params: {entry: 55, exit: 20}
+  grid:
+    entry: [20, 40, 55, 100]
+    exit: [10, 20, 40]
+
+sizing:
+  name: vol_target
+  params: {target: 0.10, lookback: 60, max_weight: 0.4, max_gross: 1.0}
+
+config:
+  initial_capital: 100000
+  execution: open
+  trailing_stop: 0.12
+  costs: {commission_bps: 0, commission_fixed: 1.0, slippage_bps: 5}
+
+robustness:
+  walk_forward: {train_years: 4, test_years: 1}
+  monte_carlo: {}
+  pbo: {}
+
+report: reports/trend_portfolio.html

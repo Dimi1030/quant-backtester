@@ -9,7 +9,7 @@
 const IMG = window.__IMG || {};
 const CREDITS = window.__CREDITS || [];
 /* focal points for photos shown in cropped frames */
-const IMG_POS = { giraffe_portrait: "50% 16%", kili_giraffe: "50% 42%", christbaum: "50% 45%", cheetah: "50% 22%", uhuru: "50% 40%", balloon: "30% 55%",
+const IMG_POS = { monalisa: "50% 28%", eiffel: "50% 35%", einstein: "50% 30%", aldrin: "50% 35%", machupicchu: "50% 45%", canberra: "50% 55%", giraffe_portrait: "50% 16%", kili_giraffe: "50% 42%", christbaum: "50% 45%", cheetah: "50% 22%", uhuru: "50% 40%", balloon: "30% 55%",
   horse_eye: "72% 32%", stonetown: "45% 50%", zebras: "42% 50%", elephant_family: "35% 40%", lion: "48% 38%", football: "50% 62%", mercury_house: "50% 40%",
   icelandic: "45% 50%", lipizzaner: "62% 50%", dikdik: "45% 50%", kili: "50% 35%", nutcracker: "50% 50%", tanzanite: "50% 45%" };
 const posOf = (id) => (IMG_POS[id] ? `object-position:${IMG_POS[id]}` : "");
@@ -37,7 +37,7 @@ const CAMPS = [
   { n: "Kibo Hut", a: 4700 }, { n: "Gilman’s Point", a: 5685 }, { n: "Uhuru Peak", a: 5895 }
 ];
 const KIND_LABEL = { mc: "Vier Antworten", tf: "Wahr oder falsch", est: "Schätzfragen", zoom: "Bilderrätsel", final: "Finale mit Einsatz" };
-const SAVE_KEY = "gipfelquiz.game.v1", SETUP_KEY = "gipfelquiz.setup.v1", SEEN_KEY = "gipfelquiz.seen.v1";
+const SAVE_KEY = "gipfelquiz.game.v2", SETUP_KEY = "gipfelquiz.setup.v2", SEEN_KEY = "gipfelquiz.seen.v1", PLAYER_KEY = "gipfelquiz.player.v1";
 
 /* ---------- Small helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -402,9 +402,13 @@ function boardSVG(teams) {
    State
    ===================================================================== */
 function defaultTeams(n) { return ANIMALS.slice(0, n).map((a, i) => ({ id: "t" + i, animal: a.id, name: a.name, members: "" })); }
-const savedSetup = store.get(SETUP_KEY);
-let setup = savedSetup && Array.isArray(savedSetup.teams) ? savedSetup : { teams: defaultTeams(4), rounds: ROUNDS.map((r) => r.id), perRound: 3, timer: 30, sound: true };
+function randomCode() { const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let s = ""; for (let i = 0; i < 4; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
+const savedSetup = store.get(SETUP_KEY) || (() => { const old = store.get("gipfelquiz.setup.v1"); return old && Array.isArray(old.teams) ? { teams: old.teams, sound: old.sound, timer: old.timer } : null; })();
+let setup = Object.assign({ teams: defaultTeams(4), rounds: ROUNDS.filter((r) => r.def !== false).map((r) => r.id), perRound: 2, timer: 30, sound: true, mode: "screen", code: randomCode() },
+  savedSetup && Array.isArray(savedSetup.teams) ? savedSetup : {});
 setup.rounds = setup.rounds.filter((id) => ROUNDS.some((r) => r.id === id));
+if (!setup.code) setup.code = randomCode();
+if (setup.mode !== "live") setup.mode = "screen";
 let game = null;
 let view = "title";
 let timer = null;
@@ -423,17 +427,18 @@ function current() {
 }
 function roundPill(R, n) { return R.kind === "zoom" ? `${n} Bilder` : R.kind === "est" ? `${n} Schätzfragen` : R.kind === "tf" ? `${n} × Wahr/Falsch` : `${n} Fragen`; }
 function perRoundCount(R, per) { return Math.min(R.questions.length, per + (R.kind === "tf" ? 2 : R.kind === "zoom" ? 1 : 0)); }
-function calcUnit(q) { return clamp(round10((SUMMIT - BASE) / (Math.max(q, 1) * 0.72)), 50, 400); }
+function calcUnit(q, live) { return clamp(round10((SUMMIT - BASE) / (Math.max(q, 1) * 0.72 * (live ? 1.25 : 1))), 50, 400); }
 function planStats(s) {
   let q = 0, sec = 0;
   for (const R of ROUNDS) {
     if (!s.rounds.includes(R.id)) continue;
     const n = perRoundCount(R, s.perRound); q += n;
-    const per = R.kind === "tf" ? 50 : R.kind === "zoom" ? 75 : R.kind === "est" ? 120 : s.timer + 55;
+    const live = s.mode === "live";
+    const per = R.kind === "tf" ? (live ? 30 : 50) : R.kind === "zoom" ? (live ? 55 : 75) : R.kind === "est" ? (live ? 80 : 120) : (live ? Math.round(s.timer * 0.6) + 30 : s.timer + 55);
     sec += n * per + 80;
   }
   sec += 260;
-  return { q, min: Math.max(10, Math.round(sec / 300) * 5), unit: calcUnit(q) };
+  return { q, min: Math.max(10, Math.round(sec / 300) * 5), unit: calcUnit(q, s.mode === "live") };
 }
 function buildPlan(s) {
   const seen = new Set(store.get(SEEN_KEY) || []);
@@ -491,8 +496,10 @@ function toast(html, ms = 4200) {
 /* =====================================================================
    Views
    ===================================================================== */
-function render() {
+function renderView() {
   renderToken++; stopTimer(); Confetti.stop(); document.getElementById("toasts").innerHTML = "";
+  document.body.classList.toggle("is-player", view === "player");
+  if (view === "player") return viewPlayer();
   if (view === "title") return viewTitle();
   if (view === "setup") return viewSetup();
   if (!game) { view = "title"; return viewTitle(); }
@@ -513,17 +520,19 @@ function viewTitle() {
   const resumable = saved && saved.plan && saved.phase && saved.phase !== "podium";
   let resumeInfo = "";
   if (resumable) { const p = saved.plan[saved.r]; const R = roundById(p.round); resumeInfo = `Runde ${saved.r + 1}: ${R ? R.title : ""}`; }
-  const topics = [["Tiere", PAL.majani], ["Tansania", PAL.safran], ["Swahili", PAL.bahari], ["Fußball", PAL.anga], ["Pferde", PAL.udongo], ["Ballett", PAL.hibiskus], ["Weihnachten", PAL.theluji]];
+  const topics = [["Allgemeinwissen", PAL.anga], ["Geografie", PAL.bahari], ["Tiere", PAL.majani], ["Tansania", PAL.safran], ["Fußball", PAL.anga], ["Pferde", PAL.udongo], ["Ballett", PAL.hibiskus], ["Kino & Musik", PAL.hibiskus], ["Weihnachten", PAL.theluji]];
   mount(`<section class="screen title-screen">
     <header class="topbar" style="justify-content:flex-end">${ctrls()}</header>
     <div class="title-wrap">
       <p class="eyebrow">Krismasi Njema · Frohe Weihnachten</p>
       <div class="wordmark-row"><h1 class="wordmark">Gipfel<span>quiz</span></h1><span class="alt-badge">${I.peak} Uhuru Peak · 5.895 m</span></div>
       <p class="tagline">Das Familienquiz vom Kilimandscharo</p>
-      <p class="lede">Bildet Seilschaften und klettert mit jeder richtigen Antwort ein Stück höher. Wer steht am Ende ganz oben?</p>
+      <p class="lede">Bildet Seilschaften und klettert mit jeder richtigen Antwort ein Stück höher – gemeinsam am Fernseher oder live mit euren Handys. Wer steht am Ende ganz oben?</p>
       <ul class="topics">${topics.map(([t, c]) => `<li style="--c:${c}"><i></i>${t}</li>`).join("")}</ul>
       <div class="title-actions">
-        ${resumable ? `<button class="btn primary big" data-act="resume" data-primary>${I.play} Weiterspielen <small>${esc(resumeInfo)}</small></button><button class="btn big" data-act="new">Neues Spiel</button>` : `<button class="btn primary big" data-act="new" data-primary>Expedition planen ${I.arrow}</button>`}
+        ${isPhone() ? `<button class="btn primary big" data-act="playerJoin" data-primary>${I.phone} Am Handy mitspielen</button>` : ""}
+        ${resumable ? `<button class="btn ${isPhone() ? "" : "primary"} big" data-act="resume" ${isPhone() ? "" : "data-primary"}>${I.play} Weiterspielen <small>${esc(resumeInfo)}</small></button><button class="btn big" data-act="new">Neues Spiel</button>` : `<button class="btn ${isPhone() ? "" : "primary"} big" data-act="new" ${isPhone() ? "" : "data-primary"}>Expedition planen ${I.arrow}</button>`}
+        ${isPhone() ? "" : `<button class="btn big" data-act="playerJoin">${I.phone} Am Handy mitspielen</button>`}
         <button class="btn ghost big" data-act="rules">So wird gespielt</button>
       </div>
       <p class="title-foot">Tipp: Laptop an den Fernseher anschließen und mit <b>F</b> auf Vollbild schalten. · <button class="linkbtn" data-act="credits">Bildnachweise</button></p>
@@ -538,7 +547,7 @@ function teamCard(t, i) {
     <button class="tcard-av" data-act="animal" data-i="${i}" aria-label="Tier von Team ${i + 1} wechseln" title="Tier wechseln"><img src="${avatarSrc(t)}" alt=""><span class="swap">${I.swap}</span></button>
     <div class="tcard-fields">
       <input class="tname" id="tname-${i}" data-i="${i}" data-field="name" value="${esc(t.name)}" maxlength="18" aria-label="Name von Team ${i + 1}" autocomplete="off">
-      <span class="tcard-sub">${esc(a.de)} · ${ROUTES[i]}-Route</span>
+      <span class="tcard-sub">${esc(a.de)} · ${ROUTES[i]}-Route <span class="devchip" id="dev-${t.id}"></span></span>
       <input class="tmem" id="tmem-${i}" data-i="${i}" data-field="members" value="${esc(t.members)}" maxlength="80" placeholder="Wer ist dabei? z. B. Oma, Lea, Ben" aria-label="Mitglieder von Team ${i + 1}" autocomplete="off">
     </div>
   </div>`;
@@ -559,11 +568,13 @@ function viewSetup() {
     </header>
     <div class="setup-grid">
       <div class="panel">
+        ${modePickHTML()}
         <div class="panel-head"><h3>Seilschaften</h3>
-          <div class="stepper"><button data-act="teams" data-d="-1" aria-label="Ein Team weniger">−</button><b>${setup.teams.length} Teams</b><button data-act="teams" data-d="1" aria-label="Ein Team mehr">+</button></div></div>
+          <div class="head-tools"><button class="btn ghost small" data-act="draw">${I.dice} Auslosen</button>
+          <div class="stepper"><button data-act="teams" data-d="-1" aria-label="Ein Team weniger">−</button><b>${setup.teams.length} Teams</b><button data-act="teams" data-d="1" aria-label="Ein Team mehr">+</button></div></div></div>
         <p class="hint">Bei 12 Leuten passen 4 Teams à 3 – am besten Jung und Alt gemischt. Tippt auf ein Tier, um es zu tauschen.</p>
         <div class="team-cards">${setup.teams.map(teamCard).join("")}</div>
-        <div><button class="btn ghost" data-act="draw">${I.dice} Teams auslosen</button></div>
+        ${setup.mode === "live" ? liveBoxHTML() : ""}
       </div>
       <div class="panel">
         <h3>Route</h3>
@@ -572,7 +583,7 @@ function viewSetup() {
           <div class="opt"><span>Fragen pro Runde</span>${seg("perRound", [2, 3, 4, 5])}</div>
           <div class="opt"><span>Bedenkzeit pro Frage</span>${seg("timer", [20, 30, 45, 60], " s")}</div>
         </div>
-        <div class="summary"><span><b>${st.q + 1} Fragen</b> inkl. Finale</span><span>ca. <b>${st.min} Minuten</b></span><span>+${fmt(st.unit)} m pro richtiger Antwort</span></div>
+        <div class="summary"><span><b>${st.q + 1} Fragen</b> inkl. Finale</span><span>ca. <b>${st.min} Minuten</b></span><span>+${fmt(st.unit)} m pro richtiger Antwort${setup.mode === "live" ? " (+ bis zu 50 % Tempo-Bonus)" : ""}</span></div>
       </div>
     </div>
     <footer class="setup-foot"><span class="hint">Start für alle: Marangu Gate auf 1.870 m. Ziel: Uhuru Peak auf 5.895 m.</span><button class="btn primary big" data-act="start" data-primary ${setup.rounds.length ? "" : "disabled"}>Aufbruch zum Gipfel ${I.arrow}</button></footer>
@@ -619,11 +630,7 @@ function viewWager() {
   const u = game.unit; const steps = [0, 2 * u, 4 * u, 6 * u];
   game.wagers = game.wagers || {};
   game.teams.forEach((t) => { if (game.wagers[t.id] === undefined) game.wagers[t.id] = 2 * u; });
-  const cards = game.teams.map((t) => {
-    const w = game.wagers[t.id] ?? 2 * u;
-    return `<div class="eteam set" style="--tc:${teamColor(t)}"><div class="eteam-id"><img src="${avatarSrc(t)}" alt=""><b>${esc(t.name)}</b><span class="res" style="color:var(--mawingu)">${fmt(t.score)} m</span></div>
-      <div class="wager" aria-label="Einsatz in Metern">${steps.map((s) => `<button data-act="wager" data-team="${t.id}" data-v="${s}" aria-pressed="${w === s}" aria-label="${fmt(s)} Meter">${fmt(s)}</button>`).join("")}</div><span class="zt">Einsatz in Höhenmetern</span></div>`;
-  }).join("");
+  const cards = wagerCardsHTML(); void steps;
   mount(`<section class="screen q wager-screen">
     ${topbar(false)}
     <div class="qmain"><div class="qcol">
@@ -631,7 +638,7 @@ function viewWager() {
       <h2 class="qtext">${esc(FINAL.cat)}</h2>
       <p class="hint" style="font-size:1.15rem">${esc(FINAL.hint)} Wie sicher seid ihr? Richtig: Meter rauf. Falsch: Meter runter.</p>
     </div></div>
-    <div class="qfoot"><div class="entry"><div class="entry-label"><b>Einsätze</b><span>Jedes Team sagt, wie viele Höhenmeter es setzt.</span></div><div class="eteams">${cards}</div>
+    <div class="qfoot"><div class="entry"><div class="entry-label"><b>Einsätze</b><span>${game.mode === "live" ? "Teams mit Handy setzen geheim am Handy, die anderen sagen es laut." : "Jedes Team sagt, wie viele Höhenmeter es setzt."}</span></div><div class="eteams" id="wagerteams">${cards}</div>
       <div class="entry-go"><button class="btn primary big" data-act="showFinal" data-primary>Frage zeigen ${I.arrow}</button></div></div></div>
   </section>`);
   save();
@@ -661,7 +668,8 @@ function tilesHTML(kind, Q, cur) {
   return `<div class="${cls}" id="tiles">${labels.map((l, k) => {
     const num = kind === "tf" ? (k === 0 ? I.thumbUp : I.thumbDown) : k + 1;
     const kk = kind === "tf" ? (k === 0 ? 3 : 0) : k;
-    return `<div class="tile k${kk}" id="tile-${k}" style="--n:${k}"><span class="tile-num">${num}</span><span class="tile-text">${esc(l)}</span><span class="tile-chips" id="chips-${k}"></span></div>`;
+    const body = Q.flags ? `<span class="tile-flag">${flagSVG(l)}<span class="flagname">${esc(FLAG_NAMES[l] || "")}</span></span>` : `<span class="tile-text">${esc(l)}</span>`;
+    return `<div class="tile k${kk}${Q.flags ? " has-flag" : ""}" id="tile-${k}" style="--n:${k}"><span class="tile-num">${num}</span>${body}<span class="tile-chips" id="chips-${k}"></span></div>`;
   }).join("")}</div>`;
 }
 function timerHTML(total) {
@@ -713,6 +721,7 @@ function applyZoom(remainingFrac, Q) {
 /* ---------- Footer area under the question (controls / entry / results) ---------- */
 function renderFoot() {
   const { kind } = current(); const cur = game.cur; const foot = $("#qfoot"); if (!foot) return;
+  if (game.mode === "live" && cur.stage !== "revealed") return renderLiveFoot();
   if (cur.stage === "run" && kind !== "zoom") {
     foot.innerHTML = `<div class="runbar">
       <button class="btn" data-act="pause" id="pausebtn">${I.pause} Pause</button>
@@ -725,9 +734,8 @@ function renderFoot() {
   foot.innerHTML = entryHTML(kind);
   updateEntryState();
 }
-function entryHTML(kind) {
+function entryHTML(kind, teams = activeTeams(), withGo = true) {
   const cur = game.cur; const { Q } = current();
-  const teams = activeTeams();
   const label = kind === "zoom" ? `<b>Wer ruft zuerst?</b><span>Tippt die Antwort eines Teams an, sobald es sie ruft. Jedes Team hat einen Versuch.</span>`
     : kind === "est" ? `<b>Schätzungen eintragen</b><span>Was steht auf den Zetteln? Kommazahlen mit Komma.</span>`
     : kind === "tf" ? `<b>Antworten eintragen</b><span>Daumen hoch = Wahr, runter = Falsch. Tasten W und F gehen auch.</span>`
@@ -742,7 +750,7 @@ function entryHTML(kind) {
       const btns = labels.map((l, k) => {
         const kk = kind === "tf" ? (k === 0 ? 3 : 0) : k;
         const inner = kind === "tf" ? (k === 0 ? `${I.thumbUp}` : `${I.thumbDown}`) : k + 1;
-        return `<button class="eopt k${kk}" data-act="pick" data-team="${t.id}" data-k="${k}" aria-label="${esc(t.name)}: ${esc(l)}" aria-pressed="false">${inner}</button>`;
+        return `<button class="eopt k${kk}" data-act="pick" data-team="${t.id}" data-k="${k}" aria-label="${esc(t.name)}: ${esc(Q.flags ? (FLAG_NAMES[l] || l) : l)}" aria-pressed="false">${inner}</button>`;
       }).join("");
       const joker = kind === "mc" || kind === "tf" ? `<button class="joker" data-act="joker" data-team="${t.id}" ${t.joker ? "" : "disabled"} title="Einmal pro Spiel: doppelte Höhenmeter">${I.wind} ${t.joker ? "Rückenwind ×2" : "Rückenwind verbraucht"}</button>` : "";
       const zt = kind === "zoom" ? `<span class="zt" id="zt-${t.id}"></span>` : "";
@@ -750,10 +758,11 @@ function entryHTML(kind) {
     }
     return `<div class="eteam" id="et-${t.id}" style="--tc:${teamColor(t)}"><div class="eteam-id"><img src="${avatarSrc(t)}" alt=""><b>${esc(t.name)}</b><span class="res" id="res-${t.id}"></span></div>${body}</div>`;
   }).join("");
-  const go = `<div class="entry-go">
+  const go = withGo ? `<div class="entry-go">
     ${kind === "zoom" && cur.stage === "run" ? `<button class="btn" data-act="pause" id="pausebtn">${I.pause} Pause</button>` : ""}
-    <button class="btn primary big" data-act="reveal" data-primary id="revealbtn">Auflösen ${I.arrow}</button></div>`;
-  return `<div class="entry"><div class="entry-label">${label}</div><div class="eteams">${cards}</div>${go}</div>`;
+    <button class="btn primary big" data-act="reveal" data-primary id="revealbtn">Auflösen ${I.arrow}</button></div>` : "";
+  const lbl = withGo ? label : `<b>Ohne Handy</b><span>Antworten dieser Teams hier eintragen.</span>`;
+  return `<div class="entry"><div class="entry-label">${lbl}</div><div class="eteams">${cards}</div>${go}</div>`;
 }
 function activeTeams() { return game.tiebreak ? game.teams.filter((t) => game.tiebreak.includes(t.id)) : game.teams; }
 function updateEntryState() {
@@ -771,6 +780,7 @@ function updateEntryState() {
 }
 function paintPicks() {
   const cur = game.cur; const { kind } = current(); if (kind === "est") return;
+  if (game.mode === "live" && cur.stage !== "revealed") { $$(".tile-chips").forEach((c) => (c.innerHTML = "")); return; }
   for (const t of activeTeams()) {
     const k = cur.picks[t.id];
     const target = k === undefined ? null : $("#chips-" + k);
@@ -821,11 +831,12 @@ function togglePause() {
   timer.running = !timer.running;
   if (timer.running) Sound.startMusic(); else { Sound.stopMusic(); if (game.cur) { game.cur.remaining = timer.remaining; save(); } }
   const b = $("#pausebtn"); if (b) b.innerHTML = timer.running ? `${I.pause} Pause` : `${I.play} Weiter`;
-  paintTimer();
+  paintTimer(); broadcast();
 }
 async function onTimeUp(kind) {
   const cur = game.cur; if (!cur || cur.stage !== "run") return;
   Sound.timeUp(); finishTimerVisual();
+  if (game.mode === "live") return liveTimeUp(kind, cur);
   if (kind === "zoom") { cur.stage = "entry"; cur.remaining = 0; save(); applyZoom(0, current().Q); renderFoot(); if (activeTeams().some((t) => cur.picks[t.id] === undefined)) toast(`${I.flag} Zeit um! Wer noch nicht gerufen hat, sagt jetzt seine Antwort.`); return; }
   cur.stage = "entry"; cur.remaining = 0; save();
   await showCountdown(kind);
@@ -855,7 +866,9 @@ function pick(teamId, k) {
     else { cur.picks[teamId] = k; cur.times[teamId] = timer ? clamp(1 - timer.remaining / timer.total, 0, 1) : 1; }
   } else if (cur.picks[teamId] === k) delete cur.picks[teamId];
   else cur.picks[teamId] = k;
+  if (game.mode === "live" && cur.picks[teamId] !== undefined && cur.times[teamId] === undefined) cur.times[teamId] = timer ? clamp(1 - timer.remaining / timer.total, 0, 1) : 1;
   Sound.click(); save(); paintPicks(); updateEntryState();
+  if (game.mode === "live") { updateLiveStatus(); broadcast(); if (cur.stage === "run" && activeTeams().every(answered)) { stopTimeEarly(); return; } }
   if (kind === "zoom" && cur.stage === "run" && activeTeams().every((t) => cur.picks[t.id] !== undefined)) { stopTimeEarly(); }
 }
 function toggleJoker(teamId) {
@@ -888,7 +901,7 @@ function computeGains() {
     for (const t of teams) {
       const k = cur.picks[t.id]; if (k === undefined || k !== cur.correct) continue;
       if (kind === "zoom") g[t.id] = Math.max(10, round10(u * (2 - 1.5 * clamp(cur.times[t.id] ?? 1, 0, 1))));
-      else g[t.id] = cur.jokers[t.id] ? 2 * u : u;
+      else { const base = game.mode === "live" ? round10(u * (1 + 0.5 * (1 - clamp(cur.times[t.id] ?? 1, 0, 1)))) : u; g[t.id] = cur.jokers[t.id] ? 2 * base : base; }
     }
   }
   return g;
@@ -907,11 +920,12 @@ async function reveal() {
   const gains = computeGains();
   for (const t of game.teams) { const d = gains[t.id] || 0; if (d) t.score = Math.max(BASE, t.score + d); }
   for (const id of Object.keys(cur.jokers)) if (cur.jokers[id] && cur.picks[id] !== undefined) { const t = teamById(id); if (t) t.joker = false; }
-  cur.gains = gains; cur.stage = "revealed"; save();
+  cur.gains = gains; cur.stage = "revealed"; save(); broadcast();
   renderRevealed(true);
 }
 function renderRevealed(animate) {
   const cur = game.cur; const { Q, kind } = current();
+  paintPicks();
   const tiles = $("#tiles");
   if (tiles) { tiles.classList.add("revealed"); const ct = $("#tile-" + cur.correct); if (ct) { ct.classList.add("correct"); if (!$(".mark", ct)) ct.insertAdjacentHTML("beforeend", `<span class="mark">${I.check}</span>`); } }
   if (kind === "zoom") { const im = $("#zimg"); if (im && !animate) im.style.transform = "translate(0%, 0%) scale(1)"; const l = $("#zlens"); if (l) l.textContent = "Ganzes Bild"; }
@@ -1091,8 +1105,8 @@ function rulesModal() {
     <ol>
       <li><b>Seilschaften bilden:</b> 2 bis 6 Teams. Bei 12 Leuten am besten 4 Teams à 3 – Kinder und Erwachsene gemischt.</li>
       <li><b>Eine Person bedient den Laptop.</b> Sie kann trotzdem mitspielen, denn niemand sieht die Lösung vorher.</li>
-      <li><b>Bei jeder Frage läuft die Bedenkzeit.</b> Ist sie um, zählt das Spiel bis drei und alle Teams zeigen gleichzeitig ihre Antwort: 1 bis 4 Finger, bei Wahr/Falsch Daumen hoch oder runter.</li>
-      <li><b>Die Spielleitung tippt ein, was jedes Team gezeigt hat,</b> und löst auf. Jede richtige Antwort bringt Höhenmeter.</li>
+      <li><b>Spielweise „Ein Bildschirm“:</b> Ist die Bedenkzeit um, zählt das Spiel bis drei und alle Teams zeigen gleichzeitig ihre Antwort – mit 1 bis 4 Fingern oder mit der Antwortkarte am Handy. Die Spielleitung tippt ein, was die Teams gezeigt haben.</li>
+      <li><b>Spielweise „Live mit Handys“:</b> Jedes Team tippt seine Antwort auf dem eigenen Handy. Wer schneller richtig liegt, bekommt bis zu 50 % Bonus-Meter. Dafür muss das Quiz auf jedem Handy bei claude.ai geöffnet und jemand angemeldet sein. Teams ohne Handy trägt die Spielleitung ein.</li>
       <li><b>Alle starten am Marangu Gate auf 1.870 m.</b> Ziel ist der Uhuru Peak auf 5.895 m. Wer drüber hinauskommt, schwebt im Heißluftballon.</li>
       <li><b>Rückenwind-Joker:</b> Jedes Team darf einmal im Spiel vor der Auflösung „Rückenwind!“ rufen und bekommt bei richtiger Antwort doppelte Höhenmeter.</li>
       <li><b>Sonderrunden:</b> Bei der Zoom-Safari ruft ihr dazwischen – je früher richtig, desto mehr Meter. Bei Schätzfragen gewinnt, wer am nächsten dran ist. Im Finale setzt ihr eure eigenen Höhenmeter.</li>
@@ -1156,7 +1170,7 @@ function startGame() {
   const plan = buildPlan(setup);
   const qCount = plan.filter((p) => p.round !== "final").reduce((s, p) => s + p.qs.length, 0);
   game = {
-    v: 1, startedAt: Date.now(), unit: calcUnit(qCount), plan, r: 0, i: 0, phase: "intro", cur: null, wagers: null, tiebreak: null,
+    v: 2, id: randomCode() + Date.now().toString(36).slice(-4), mode: setup.mode === "live" ? "live" : "screen", startedAt: Date.now(), unit: calcUnit(qCount, setup.mode === "live"), plan, r: 0, i: 0, phase: "intro", cur: null, wagers: null, wagerLocked: null, tiebreak: null,
     settings: { timer: setup.timer },
     teams: setup.teams.map((t) => ({ id: t.id, animal: t.animal, name: (t.name || animal(t.animal).name).trim(), members: (t.members || "").trim(), score: BASE, joker: true })),
     prevScores: null
@@ -1179,7 +1193,7 @@ function toggleSound() {
 /* ---------- Actions ---------- */
 const A = {
   new() { view = "setup"; render(); },
-  resume() { const s = store.get(SAVE_KEY); if (!s) return; game = s; view = "game"; if (game.cur && game.cur.stage === "revealing") game.cur.stage = "entry"; keepAwake(); render(); },
+  resume() { const s = store.get(SAVE_KEY); if (!s) return; game = s; view = "game"; if (game.cur && game.cur.stage === "revealing") game.cur.stage = "entry"; if (game.mode === "live") Net.ensure(); keepAwake(); render(); },
   home() { view = "title"; render(); },
   rules() { rulesModal(); },
   credits() { creditsModal(); },
@@ -1209,11 +1223,11 @@ const A = {
   doDraw() { doDraw(); },
   applyDraw() { if (!lastDraw) return; setup.teams.forEach((t, i) => (t.members = lastDraw[i].join(", "))); saveSetup(); closeModal(); render(); },
   start() { if (!setup.rounds.length) return; Sound.unlock(); startGame(); },
-  beginRound() { const { p } = current(); if (p.round === "final") { game.phase = "wager"; game.wagers = null; } else { game.phase = "question"; game.i = 0; game.cur = null; } save(); render(); },
+  beginRound() { const { p } = current(); if (p.round === "final") { game.phase = "wager"; game.wagers = null; game.wagerLocked = null; } else { game.phase = "question"; game.i = 0; game.cur = null; } save(); render(); },
   wager(b) { game.wagers[b.dataset.team] = Number(b.dataset.v); Sound.click(); save(); $$(`.wager button[data-team="${b.dataset.team}"]`).forEach((x) => x.setAttribute("aria-pressed", String(x === b))); },
   showFinal() { game.phase = "question"; game.cur = null; save(); render(); },
   pause() { togglePause(); },
-  addTime() { if (timer) { timer.total += 10; timer.remaining += 10; Sound.setUrgent(false); paintTimer(); } },
+  addTime() { if (timer) { timer.total += 10; timer.remaining += 10; Sound.setUrgent(false); paintTimer(); broadcast(); } },
   stopTime() { stopTimeEarly(); },
   pick(b) { pick(b.dataset.team, Number(b.dataset.k)); },
   joker(b) { toggleJoker(b.dataset.team); },
@@ -1241,7 +1255,8 @@ document.addEventListener("click", (e) => {
 document.addEventListener("input", (e) => {
   const el = e.target;
   if (el.matches(".tcard-fields input")) { const t = setup.teams[Number(el.dataset.i)]; if (t) { t[el.dataset.field] = el.value; saveSetup(); } }
-  else if (el.matches(".est-input") && game?.cur) { game.cur.est[el.dataset.team] = el.value; save(); updateEntryState(); }
+  else if (el.matches(".est-input") && game?.cur) { game.cur.est[el.dataset.team] = el.value; save(); updateEntryState(); if (game.mode === "live") { updateLiveStatus(); broadcast(); } }
+  else if (el.id === "pname") { P.name = el.value.slice(0, 24); savePlayer(); }
 });
 document.addEventListener("keydown", (e) => {
   if (e.altKey || e.ctrlKey || e.metaKey) return;
@@ -1254,6 +1269,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (modalOpen) { if (e.key === "Escape") closeModal(); return; }
+  if (view === "player") return;
   const k = e.key;
   if (k === " " || k === "Enter" || k === "ArrowRight" || k === "PageDown") {
     if (tag === "BUTTON" && (k === " " || k === "Enter")) return;
@@ -1274,6 +1290,8 @@ document.addEventListener("keydown", (e) => {
   if (k === "m" || k === "M") { toggleSound(); return; }
   if (k === "f" || k === "F") { toggleFS(); return; }
 });
+
+/*__LIVE__*/
 
 /* ---------- Boot (keeps state across live updates of the page) ---------- */
 function boot(data) {

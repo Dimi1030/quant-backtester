@@ -100,10 +100,15 @@ function hostState() {
       ord: cur.order || null, sg: cur.stage === "revealing" ? "entry" : cur.stage, tot: timer ? timer.total : durationFor(kind),
       left: timer ? Math.max(0, timer.remaining) : (cur.stage === "run" ? (cur.remaining ?? durationFor(kind)) : 0), run: !!(timer && timer.running),
       ans: activeTeams().filter(answered).map((t) => t.id), act: activeTeams().map((t) => t.id) };
+    q.rd = cur.started || cur.stage !== "run" ? 1 : 0;
     if (cur.stage === "revealed") q.rev = { c: cur.correct ?? null, g: cur.gains || {}, p: cur.picks, e: kind === "est" ? cur.est : null };
     st.q = q;
   }
   if (game.phase === "wager") st.w = { opts: wagerSteps(), set: Object.keys(game.wagerLocked || {}) };
+  if (game.phase === "podium" || game.phase === "awards") {
+    st.cd = game.cerDone ? 1 : 0;
+    if (game.awards) st.aw = Object.fromEntries(Object.entries(game.awards).map(([id, a]) => [id, { t: a.t, d: String(a.d).slice(0, 70), i: a.icon }]));
+  }
   return st;
 }
 let hostPresenceOn = false;
@@ -117,6 +122,7 @@ function broadcast() {
 function render() {
   renderView();
   try {
+    hudBadges();
     if (view === "setup" && setup.mode === "live") { Net.ensure(); updateSetupDevices(); }
     if (view === "game" && game && game.mode === "live") { Net.ensure(); updateDeviceBadges(); }
     broadcast();
@@ -127,16 +133,17 @@ function onLivePeers() {
   if (view !== "game" || !game || game.mode !== "live") return;
   const list = livePlayers(); let changed = false;
   if (game.phase === "question" && game.cur && (game.cur.stage === "run" || game.cur.stage === "entry")) {
-    const id = qid(); const { kind } = current(); const cur = game.cur; const nOpt = kind === "tf" ? 2 : 4;
+    const id = qid(); const { kind } = current(); const cur = game.cur; const nOpt = kind === "tf" ? 2 : 4; const fresh = [];
     for (const pl of list) {
       const pr = pl.presence; const a = pr.ans; if (!a || a.id !== id) continue;
       const t = activeTeams().find((x) => x.id === pr.team); if (!t || answered(t)) continue;
       if (kind === "est") { const v = String(a.v ?? "").slice(0, 24); if (!Number.isFinite(parseNum(v))) continue; cur.est[t.id] = v; }
       else { const k = Number(a.k); if (!Number.isInteger(k) || k < 0 || k >= nOpt) continue; cur.picks[t.id] = k; if (a.j && t.joker && (kind === "mc" || kind === "tf")) cur.jokers[t.id] = true; }
-      cur.times[t.id] = timer ? clamp(1 - timer.remaining / timer.total, 0, 1) : 1; changed = true;
+      cur.times[t.id] = timer ? clamp(1 - timer.remaining / timer.total, 0, 1) : 1; changed = true; fresh.push(t.id);
     }
     if (changed) {
-      save(); Sound.click(); updateLiveStatus(); broadcast();
+      save(); SFX.lockIn(); updateLiveStatus(); broadcast();
+      fresh.forEach((tid) => FX.pulse($("#ts-" + tid), PAL.good));
       if (cur.stage === "run" && activeTeams().every(answered)) stopTimeEarly(); else if (cur.stage === "entry") renderFoot();
     } else updateLiveStatus();
   } else if (game.phase === "wager") {
@@ -147,7 +154,7 @@ function onLivePeers() {
       const v = Number(pr.wg.v); if (!wagerSteps().includes(v)) continue;
       game.wagers[t.id] = v; game.wagerLocked[t.id] = true; changed = true;
     }
-    if (changed) { save(); Sound.click(); broadcast(); }
+    if (changed) { save(); SFX.lockIn(); broadcast(); }
     renderWagerCards();
   }
   updateDeviceBadges();
@@ -178,8 +185,10 @@ function liveTimeUp(kind, cur) {
   cur.stage = "entry"; cur.remaining = 0; save();
   if (kind === "zoom") applyZoom(0, current().Q);
   broadcast();
-  if (activeTeams().every(answered)) { toast(`${I.check} Alle haben getippt!`); setTimeout(() => { if (game && game.cur === cur && cur.stage === "entry") reveal(); }, 1100); }
-  else renderFoot();
+  if (activeTeams().every(answered)) {
+    FX.callout("Alle haben getippt!", { sub: "Jetzt wird’s spannend …", sound: SFX.lockIn, shakeAmt: 5, hold: 450 })
+      .then((ok) => { if (ok && game && game.cur === cur && cur.stage === "entry") reveal(); });
+  } else { renderFoot(); FX.callout("Zeit ist um!", { cls: "co-fire", sound: SFX.boom, shakeAmt: 12, hold: 500 }); }
 }
 function wagerCardsHTML() {
   const u = game.unit; const steps = wagerSteps(); const devs = game.mode === "live" ? devicesByTeam() : {};
@@ -255,7 +264,7 @@ function playerKey() {
   if (!h) return `search:${liveHosts().map((x) => x.presence.code).join(",")}:${Date.now() - PS.since > 6000}:${Net.status}`;
   const st = h.presence.st || {}; const q = st.q || {};
   return [h.peer, P.team, JSON.stringify(h.presence.teams), st.ph, st.r, q.id, q.sg, (q.ans || []).includes(P.team), PS.ans && PS.ans.id, PS.joker,
-    st.ph === "wager" ? (st.w && st.w.set || []).includes(P.team) + ":" + (PS.wg && PS.wg.gid) : "", st.ph === "board" || st.ph === "podium" || q.sg === "revealed" ? JSON.stringify(st.sc) : "", (st.jk || []).includes(P.team)].join("|");
+    st.ph === "wager" ? (st.w && st.w.set || []).includes(P.team) + ":" + (PS.wg && PS.wg.gid) : "", st.ph === "board" || st.ph === "podium" || st.ph === "awards" || q.sg === "revealed" ? JSON.stringify(st.sc) : "", (st.jk || []).includes(P.team), q.rd, st.cd, st.aw ? 1 : 0].join("|");
 }
 function playerUpdate() {
   if (view !== "player") return;
@@ -300,15 +309,20 @@ function viewPlayer() {
     const set = (st.w.set || []).includes(P.team) || (PS.wg && PS.wg.gid === st.gid);
     body = set ? `<div class="pmsg"><div class="pcheck">${I.check}</div><div class="pbig">Einsatz gesetzt</div>${PS.wg ? `<p><b>${fmt(PS.wg.v)} m</b></p>` : ""}<p class="pnote">Gleich kommt die Finalfrage.</p></div>`
       : `<p class="pq-k">Gipfelsturm · Kategorie</p><h2 class="pq">${esc(FINAL.cat)}</h2><p>Wie viele Höhenmeter setzt ihr? Richtig: Meter rauf. Falsch: Meter runter.</p><div class="pwager">${st.w.opts.map((v) => `<button class="btn big" data-act="pWager" data-v="${v}">${fmt(v)} m</button>`).join("")}</div>`;
-  } else if (st.ph === "board" || st.ph === "podium") {
+  } else if ((st.ph === "podium" || st.ph === "awards") && !st.cd) {
+    body = `<div class="pmsg pwait"><div class="pdrum" aria-hidden="true">${I.crown}</div><div class="pbig">Siegerehrung!</div><p>Schaut auf den Fernseher – gleich wird enthüllt, wer ganz oben steht …</p></div>`;
+  } else if (st.ph === "board" || st.ph === "podium" || st.ph === "awards") {
     const order = Object.entries(sc).sort((a, b) => b[1] - a[1]);
     const rank = rankIn(sc, P.team); const next = CAMPS.find((c) => c.a > (my ?? BASE));
-    const msg = st.ph === "podium" ? (rank === 1 ? "Hongera! Ihr steht ganz oben!" : `Platz ${rank} – stark geklettert!`) : `Platz ${rank}`;
-    body = `<div class="pmsg"><div class="pbig">${msg}</div><p><b>${fmt(my ?? BASE)} m</b>${next && st.ph !== "podium" ? ` · noch ${fmt(next.a - (my ?? BASE))} m bis ${esc(next.n)}` : ""}</p></div>
+    const end = st.ph !== "board"; const aw = end && st.aw && st.aw[P.team];
+    const msg = end ? (rank === 1 ? "Hongera! Ihr steht ganz oben!" : `Platz ${rank} – stark geklettert!`) : `Platz ${rank}`;
+    body = `<div class="pmsg ${end && rank === 1 ? "pwin" : ""}"><div class="pbig">${msg}</div><p><b>${fmt(my ?? BASE)} m</b>${next && !end ? ` · noch ${fmt(next.a - (my ?? BASE))} m bis ${esc(next.n)}` : ""}</p></div>
+      ${aw ? `<div class="paward"><span class="award-ic">${AI[aw.i] || AI.heart}</span><span><b>${esc(aw.t)}</b><em>${esc(aw.d)}</em></span></div>` : ""}
       <ol class="pranks">${order.map(([id, v]) => { const t = h.presence.teams.find((x) => x.id === id) || { n: "?", a: "simba" }; return `<li class="${id === P.team ? "me" : ""}" style="--tc:${animal(t.a).color}"><img src="${avatarSrc({ animal: t.a })}" alt=""><b>${esc(t.n)}</b><span>${fmt(v)} m</span></li>`; }).join("")}</ol>`;
   }
   mount(phoneShell(body, head));
   tickPlayer();
+  phoneFX(st);
 }
 function playerQuestionHTML(st, q) {
   const Q = localQuestion(q); if (!Q) return `<div class="pmsg"><p>Diese Frage kennt das Handy nicht. Bitte die Seite neu laden.</p></div>`;
@@ -331,6 +345,7 @@ function playerQuestionHTML(st, q) {
     return `<div class="pmsg locked"><div class="pcheck">${I.check}</div><div class="pbig">Eingeloggt!</div><p>${mine ? `Eure Antwort: <b>${esc(what)}</b>${PS.ans.j ? " · mit Rückenwind" : ""}` : "Euer Team hat schon geantwortet."}</p><p class="pnote">Warte auf die anderen Teams …</p></div>`;
   }
   if (q.sg !== "run") return `<div class="pmsg"><div class="pbig">Zeit ist um!</div><p>Gleich kommt die Auflösung.</p></div>`;
+  if (q.rd === 0) return `<p class="pq-k">${q.ri === "final" ? (q.tb ? "Stechfrage" : "Finalfrage") : `Frage ${q.n} von ${q.of}`}</p><h2 class="pq">${esc(Q.q)}</h2><div class="pmsg pready"><div class="pready-ring" aria-hidden="true"></div><div class="pbig">Gleich geht’s los …</div><p>Lest die Frage auf dem Fernseher.</p></div>`;
   const timerBar = `<div class="ptimer"><i id="pbar"></i><span id="psec"></span></div>`;
   const head = `<p class="pq-k">${q.ri === "final" ? (q.tb ? "Stechfrage" : "Finalfrage") : `Frage ${q.n} von ${q.of}`}</p><h2 class="pq">${esc(Q.q)}</h2>`;
   if (kind === "est") return `${timerBar}${head}<div class="pest"><input id="pestv" inputmode="decimal" autocomplete="off" placeholder="Eure Schätzung" aria-label="Eure Schätzung in ${esc(Q.u)}"><span>${esc(Q.u)}</span></div><button class="btn primary big pfull" data-act="pEst">Abschicken</button>`;
@@ -375,7 +390,7 @@ function viewCard() {
     <div class="pactions"><button class="joker pj" data-act="cardJoker">${I.wind} Rückenwind-Joker zeigen</button>${Net.status === "on" ? `<button class="linkbtn" data-act="searchLive">Live-Spiel suchen</button>` : ""}<button class="linkbtn" data-act="leavePlayer">Zurück zum Start</button></div>`,
     `<header class="phead plain"><b>Antwort<span>karte</span></b><em>Gipfelquiz</em></header>`));
 }
-const vibrate = () => { try { navigator.vibrate && navigator.vibrate(35); } catch { /* not allowed */ } };
+const vibrate = (p = 35) => { try { navigator.vibrate && navigator.vibrate(p); } catch { /* not allowed */ } };
 
 /* ---------- Actions for the new parts ---------- */
 Object.assign(A, {
@@ -389,14 +404,14 @@ Object.assign(A, {
   pickTeam(b) { const n = $("#pname"); if (n) P.name = n.value.trim().slice(0, 24); P.team = b.dataset.team; savePlayer(); PS.ans = null; PS.wg = null; playerPresence(); PS.key = ""; render(); },
   changeTeam() { P.team = null; savePlayer(); playerPresence(); PS.key = ""; render(); },
   pAnswer(b) {
-    const h = myHost(); const q = h && h.presence.st && h.presence.st.q; if (!q || q.sg !== "run") return;
+    const h = myHost(); const q = h && h.presence.st && h.presence.st.q; if (!q || q.sg !== "run" || q.rd === 0) return;
     PS.ans = { id: q.id, k: Number(b.dataset.k), j: PS.joker === q.id ? 1 : 0 }; PS.joker = null;
     playerPresence(); vibrate(); PS.key = ""; render();
   },
   pJoker() { const h = myHost(); const q = h && h.presence.st && h.presence.st.q; if (!q) return; PS.joker = PS.joker === q.id ? null : q.id; PS.key = ""; render(); },
   pEst() {
     const h = myHost(); const q = h && h.presence.st && h.presence.st.q; const inp = $("#pestv"); const v = ((inp && inp.value) || "").trim();
-    if (!q || q.sg !== "run") return;
+    if (!q || q.sg !== "run" || q.rd === 0) return;
     if (!Number.isFinite(parseNum(v))) { if (inp) { inp.classList.remove("shake"); void inp.offsetWidth; inp.classList.add("shake"); inp.focus(); } return; }
     PS.ans = { id: q.id, v }; playerPresence(); vibrate(); PS.key = ""; render();
   },

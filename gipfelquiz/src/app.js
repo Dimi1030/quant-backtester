@@ -103,8 +103,8 @@ function roundStyle(R) { const [c1, c2] = roundColors(R); return `--c1:${c1};--c
    Sound: everything is synthesised with WebAudio (kalimba, shaker, drums)
    ===================================================================== */
 const Sound = (() => {
-  let ctx = null, master = null, fx = null, musicBus = null, noiseBuf = null, timerId = null, nextT = 0, step = 0, urgent = false;
-  let enabled = true;
+  let ctx = null, master = null, fx = null, rev = null, musicBus = null, noiseBuf = null, timerId = null, nextT = 0, step = 0, urgent = false;
+  let enabled = true, unlocked = false;
   const EIGHTH = 60 / 106 / 2;
   const N = { C3: 130.81, F2: 87.31, G2: 98, A2: 110, C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392, A4: 440, B4: 493.88, C5: 523.25, D5: 587.33, E5: 659.25, G5: 783.99, A5: 880, C6: 1046.5 };
   const BARS = [
@@ -118,7 +118,17 @@ const Sound = (() => {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return false;
       try { ctx = new AC(); } catch { return false; }
-      master = ctx.createGain(); master.gain.value = enabled ? 0.55 : 0; master.connect(ctx.destination);
+      master = ctx.createGain(); master.gain.value = enabled ? 0.55 : 0;
+      // a gentle compressor keeps the big hits loud without clipping
+      const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.22;
+      master.connect(comp); comp.connect(ctx.destination);
+      // a synthetic hall for impacts and fanfares
+      try {
+        rev = ctx.createGain(); rev.gain.value = 0.3; const conv = ctx.createConvolver();
+        const len = Math.round(ctx.sampleRate * 2.4), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+        for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2); }
+        conv.buffer = ir; rev.connect(conv); conv.connect(master);
+      } catch { rev = null; }
       fx = ctx.createDelay(1); fx.delayTime.value = 0.19;
       const fb = ctx.createGain(); fb.gain.value = 0.25; const wet = ctx.createGain(); wet.gain.value = 0.16;
       fx.connect(fb); fb.connect(fx); fx.connect(wet); wet.connect(master);
@@ -133,7 +143,7 @@ const Sound = (() => {
   function pluck(freq, t, vel = 0.4, dest = master, dur = 1.3) {
     const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vel, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     const o = ctx.createOscillator(); o.type = "sine"; o.frequency.setValueAtTime(freq, t);
-    const o2 = ctx.createOscillator(); o2.type = "sine"; o2.frequency.setValueAtTime(freq * 5.95, t);
+    const o2 = ctx.createOscillator(); o2.type = "sine"; o2.frequency.setValueAtTime(Math.min(freq * 5.95, 18000), t);
     const g2 = ctx.createGain(); g2.gain.setValueAtTime(0.3, t); g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
     const o3 = ctx.createOscillator(); o3.type = "triangle"; o3.frequency.setValueAtTime(freq * 2.01, t);
     const g3 = ctx.createGain(); g3.gain.setValueAtTime(0.14, t); g3.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
@@ -171,7 +181,8 @@ const Sound = (() => {
   function schedule() { while (nextT < ctx.currentTime + 0.14) { playStep(step, nextT); nextT += EIGHTH; step = (step + 1) % 32; } }
   return {
     get enabled() { return enabled; },
-    unlock() { init(); },
+    unlock() { unlocked = true; init(); },
+    _x() { const on = enabled && unlocked && init(); return { ok: () => on, ctx, master, rev, noiseBuf, pluck, noise, drum, brass, N }; },
     setEnabled(v) { enabled = v; if (ctx) master.gain.setTargetAtTime(v ? 0.55 : 0, ctx.currentTime, 0.05); if (!v) this.stopMusic(); },
     startMusic() { if (!ok()) return; this.stopMusic(); urgent = false; step = 0; nextT = ctx.currentTime + 0.08; timerId = setInterval(schedule, 25); },
     stopMusic() { if (timerId) clearInterval(timerId); timerId = null; },
@@ -204,7 +215,7 @@ const Sound = (() => {
    ===================================================================== */
 const Sky = (() => {
   const cv = document.getElementById("sky"); const cx = cv.getContext("2d");
-  let W = 0, H = 0, stars = [], flakes = [], snow = false, last = 0, raf = 0;
+  let W = 0, H = 0, stars = [], flakes = [], snow = false, last = 0, raf = 0, meteors = [], nextMeteor = 0;
   function flake(any) { return { x: Math.random() * W, y: any ? Math.random() * H : -8, r: Math.random() * 2 + 0.7, vy: 14 + Math.random() * 26, vx: -5 + Math.random() * 10, ph: Math.random() * 6.3 }; }
   function resize() {
     const dpr = Math.min(2, window.devicePixelRatio || 1); W = innerWidth; H = innerHeight;
@@ -219,6 +230,15 @@ const Sky = (() => {
     for (const s of stars) {
       cx.globalAlpha = reduced ? 0.7 : 0.25 + 0.75 * Math.abs(Math.sin((t / 1000) * s.s + s.p));
       cx.fillStyle = s.warm ? "#FFE2A6" : "#FFFFFF"; cx.beginPath(); cx.arc(s.x, s.y, s.r, 0, 6.283); cx.fill();
+    }
+    if (!reduced) {
+      if (t > nextMeteor) { if (nextMeteor) meteors.push({ x: W * (0.2 + Math.random() * 0.75), y: H * (0.03 + Math.random() * 0.28), vx: -(420 + Math.random() * 360), vy: 160 + Math.random() * 140, age: 0, life: 0.7 + Math.random() * 0.5 }); nextMeteor = t + 2600 + Math.random() * 5200; }
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i]; m.age += dt; const k = m.age / m.life; if (k >= 1) { meteors.splice(i, 1); continue; }
+        m.x += m.vx * dt; m.y += m.vy * dt; const x2 = m.x - m.vx * 0.12, y2 = m.y - m.vy * 0.12;
+        const g = cx.createLinearGradient(m.x, m.y, x2, y2); g.addColorStop(0, `rgba(255,247,224,${(Math.sin(k * Math.PI) * 0.95).toFixed(3)})`); g.addColorStop(1, "rgba(255,247,224,0)");
+        cx.globalAlpha = 1; cx.strokeStyle = g; cx.lineWidth = 2.2; cx.lineCap = "round"; cx.beginPath(); cx.moveTo(m.x, m.y); cx.lineTo(x2, y2); cx.stroke();
+      }
     }
     if (snow && !reduced) {
       cx.fillStyle = "#FFFFFF";
@@ -312,20 +332,35 @@ function giraffeSil(x, y, s) {
     <path d="M${P(-31, 106)} L${P(-45, 101)} Q${P(-49, 106)} ${P(-43, 110)} L${P(-24, 119)} Q${P(-22, 112)} ${P(-31, 106)} Z"/>
     <path d="M${P(-28, 116)} L${P(-29, 124)} M${P(-24, 117)} L${P(-24, 125)} M${P(30, 49)} L${P(35, 30)}" stroke="#05081A" stroke-width="${(2 * s).toFixed(1)}" stroke-linecap="round"/>`;
 }
+/* summit night: a chain of headlamps zig-zags up the mountain (pole pole) */
+function headlamps() {
+  const trail = "M318 486 L404 444 L352 404 L438 358 L388 320 L458 276 L420 242 L478 204 L452 174 L494 142";
+  const dots = Array.from({ length: 11 }, (_, k) => `<g><circle r="7" fill="#FFE3A3" opacity=".22"/><circle r="2.3" fill="#FFF4D2"/><animateMotion dur="96s" begin="-${(k * 8.7).toFixed(1)}s" repeatCount="indefinite"><mpath href="#hltrail"/></animateMotion><animate attributeName="opacity" values="1;.35;1" dur="${(1.6 + (k % 4) * 0.45).toFixed(2)}s" repeatCount="indefinite"/></g>`).join("");
+  return `<path id="hltrail" d="${trail}" fill="none" stroke="rgba(255,226,170,.12)" stroke-width="2" stroke-dasharray="1 7" stroke-linecap="round"/>${dots}`;
+}
+function treeLights(x, y, s) {
+  const cols = [PAL.safran, PAL.hibiskus, PAL.bahari, PAL.majani, "#FFF4D2"];
+  const pts = [[-86, 101], [-64, 113], [-40, 119], [-16, 126], [8, 128], [30, 126], [54, 124], [78, 113], [92, 105], [62, 97], [32, 99], [2, 100], [-30, 97], [-62, 96]];
+  return pts.map(([dx, dy], k) => {
+    const cx = (x + dx * s).toFixed(1), cy = (y - dy * s).toFixed(1), c = cols[k % cols.length];
+    return `<g><circle cx="${cx}" cy="${cy}" r="${(6 * s).toFixed(1)}" fill="${c}" opacity=".3"/><circle cx="${cx}" cy="${cy}" r="${(2.5 * s).toFixed(1)}" fill="${c}"/><animate attributeName="opacity" values="1;.2;1" dur="${(1.2 + (k % 5) * 0.37).toFixed(2)}s" begin="${(k * 0.21).toFixed(2)}s" repeatCount="indefinite"/></g>`;
+  }).join("");
+}
 function sceneSVG() {
   return `<svg viewBox="0 0 1600 780" preserveAspectRatio="xMidYMax slice" aria-hidden="true">
     ${mountainDefs("s")}
     <defs><radialGradient id="dusk" cx=".5" cy="1" r=".75"><stop offset="0" stop-color="#E0693E" stop-opacity=".55"/><stop offset=".45" stop-color="#E5487D" stop-opacity=".18"/><stop offset="1" stop-color="#E5487D" stop-opacity="0"/></radialGradient>
     <radialGradient id="starglow"><stop offset="0" stop-color="#FFF4D6" stop-opacity=".9"/><stop offset="1" stop-color="#FFF4D6" stop-opacity="0"/></radialGradient></defs>
     <ellipse cx="1060" cy="780" rx="980" ry="460" fill="url(#dusk)"/>
-    <g class="xstar" transform="translate(1080 66)"><circle r="46" fill="url(#starglow)"/><path d="M0 -30 L5 -5 L30 0 L5 5 L0 30 L-5 5 L-30 0 L-5 -5 Z" fill="#FFF7E0"/><path d="M0 -14 L3 -3 L14 0 L3 3 L0 14 L-3 3 L-14 0 L-3 -3 Z" fill="#fff" transform="rotate(45)"/></g>
+    <g class="xstar" transform="translate(1080 66)"><circle r="46" fill="url(#starglow)"><animate attributeName="r" values="40;60;40" dur="3.4s" repeatCount="indefinite"/></circle><path d="M0 -30 L5 -5 L30 0 L5 5 L0 30 L-5 5 L-30 0 L-5 -5 Z" fill="#FFF7E0"/><path d="M0 -14 L3 -3 L14 0 L3 3 L0 14 L-3 3 L-14 0 L-3 -3 Z" fill="#fff" transform="rotate(45)"/></g>
     <g transform="translate(560 60)">
       <path d="M-560 720 L-560 676 C-420 668 -250 650 -120 626 C-70 616 -30 608 0 600 L0 720 Z" fill="url(#sbody)"/>
       <path d="M1000 450 C1010 470 1020 488 1040 512 L1040 720 L1000 720 Z" fill="url(#sbody)"/>
       ${mountainBody("s")}
+      ${headlamps()}
     </g>
     <path d="M0 780 L0 728 Q240 712 520 724 T1040 720 T1600 716 L1600 780 Z" fill="#070B1F"/>
-    <g fill="#05081A">${acacia(120, 752, 1.1)}${acacia(1470, 756, 1.3)}${acacia(1330, 750, 0.66)}${giraffeSil(470, 748, 0.9)}${giraffeSil(400, 750, 0.68)}</g>
+    <g fill="#05081A">${acacia(120, 752, 1.1)}${acacia(1470, 756, 1.3)}${acacia(1330, 750, 0.66)}${giraffeSil(470, 748, 0.9)}${giraffeSil(400, 750, 0.68)}</g>${treeLights(120, 752, 1.1)}${treeLights(1470, 756, 1.3)}
   </svg>`;
 }
 
@@ -482,7 +517,8 @@ function topbar(showDots = true) {
   const { p, R } = current();
   const n = p.qs.length;
   const dots = showDots && n > 1 ? `<div class="dots" aria-hidden="true">${p.qs.map((_, k) => `<i class="${k < game.i ? "done" : k === game.i ? "now" : ""}"></i>`).join("")}</div>` : "";
-  const ts = game.teams.map((t) => `<div class="ts" id="ts-${t.id}" style="--tc:${teamColor(t)}"><img src="${avatarSrc(t)}" alt=""><span><b>${esc(t.name)}</b><em>${fmt(t.score)} m</em></span></div>`).join("");
+  const rk = rankMap(); const tied = allTied();
+  const ts = game.teams.map((t) => `<div class="ts" id="ts-${t.id}" style="--tc:${teamColor(t)};--p:${altPct(t.score)}%"><i class="rk ${rk[t.id] === 1 ? "first" : ""} ${tied ? "hide" : ""}">${rk[t.id]}</i><img src="${avatarSrc(t)}" alt=""><span><b>${esc(t.name)}</b><em>${fmt(t.score)} m</em></span></div>`).join("");
   return `<header class="topbar">
     <div class="round-badge"><span class="sw" style="${roundStyle(R)}"></span><span><b>${esc(R.title)}</b><br><small>Runde ${game.r + 1} von ${game.plan.length}</small></span>${dots}</div>
     <div class="teamstrip">${ts}</div>${ctrls()}
@@ -499,6 +535,7 @@ function toast(html, ms = 4200) {
 function renderView() {
   renderToken++; stopTimer(); Confetti.stop(); document.getElementById("toasts").innerHTML = "";
   document.body.classList.toggle("is-player", view === "player");
+  screenFX();
   if (view === "player") return viewPlayer();
   if (view === "title") return viewTitle();
   if (view === "setup") return viewSetup();
@@ -509,6 +546,7 @@ function renderView() {
     case "question": return viewQuestion();
     case "board": return viewBoard();
     case "podium": return viewPodium();
+    case "awards": return viewAwards();
     default: game.phase = "intro"; return viewIntro();
   }
 }
@@ -517,7 +555,7 @@ function renderView() {
 function viewTitle() {
   setScene("title");
   const saved = store.get(SAVE_KEY);
-  const resumable = saved && saved.plan && saved.phase && saved.phase !== "podium";
+  const resumable = saved && saved.plan && saved.phase && saved.phase !== "podium" && saved.phase !== "awards";
   let resumeInfo = "";
   if (resumable) { const p = saved.plan[saved.r]; const R = roundById(p.round); resumeInfo = `Runde ${saved.r + 1}: ${R ? R.title : ""}`; }
   const topics = [["Allgemeinwissen", PAL.anga], ["Geografie", PAL.bahari], ["Tiere", PAL.majani], ["Tansania", PAL.safran], ["Fußball", PAL.anga], ["Pferde", PAL.udongo], ["Ballett", PAL.hibiskus], ["Kino & Musik", PAL.hibiskus], ["Weihnachten", PAL.theluji]];
@@ -538,6 +576,7 @@ function viewTitle() {
       <p class="title-foot">Tipp: Laptop an den Fernseher anschließen und mit <b>F</b> auf Vollbild schalten. · <button class="linkbtn" data-act="credits">Bildnachweise</button></p>
     </div>
   </section>`);
+  titleFX();
 }
 
 /* ---------- Setup ---------- */
@@ -621,7 +660,7 @@ function viewIntro() {
     </div>
     <div class="intro-actions"><button class="btn primary big pulse" data-act="beginRound" data-primary>${isFinal ? "Einsätze festlegen" : "Los geht’s"} ${I.arrow}</button></div>
   </section>`);
-  Sound.whoosh();
+  introFX(R, isFinal);
 }
 
 /* ---------- Final: wager ---------- */
@@ -700,7 +739,13 @@ function viewQuestion() {
   if (cur.stage === "entry") { finishTimerVisual(); renderFoot(); return; }
   // stage "run"
   renderFoot();
-  startTimer(cur.remaining ?? total, total, kind);
+  const go = () => {
+    startTimer(cur.remaining ?? total, total, kind);
+    if (modalOpen && timer && timer.running) { togglePause(); const m = $("#modal"); if (m) m.dataset.resume = "1"; }
+    if (game.mode === "live" && activeTeams().every(answered)) stopTimeEarly();
+  };
+  if (cur.started) return go();
+  questionIntro(() => { cur.started = true; save(); go(); broadcast(); });
 }
 function setupZoom(Q) {
   const im = $("#zimg"); if (!im) return;
@@ -808,8 +853,8 @@ function startTimer(remaining, total, kind) {
     const sec = Math.ceil(timer.remaining);
     if (sec !== timer.lastSec) {
       timer.lastSec = sec;
-      if (sec <= 5 && sec > 0) Sound.tick(sec === 1);
-      if (sec === 10) Sound.setUrgent(true);
+      if (sec <= 5 && sec > 0) { Sound.tick(sec === 1); SFX.heartbeat(); }
+      if (sec === 10) { Sound.setUrgent(true); document.body.classList.add("urgent"); BG.mood("tension"); }
       if (game.cur) game.cur.remaining = timer.remaining;
     }
     if (timer.remaining <= 0) { cancelAnimationFrame(timer.raf); const k = timer.kind; timer = null; Sound.stopMusic(); onTimeUp(k); }
@@ -835,23 +880,23 @@ function togglePause() {
 }
 async function onTimeUp(kind) {
   const cur = game.cur; if (!cur || cur.stage !== "run") return;
-  Sound.timeUp(); finishTimerVisual();
+  Sound.timeUp(); finishTimerVisual(); document.body.classList.remove("urgent");
   if (game.mode === "live") return liveTimeUp(kind, cur);
-  if (kind === "zoom") { cur.stage = "entry"; cur.remaining = 0; save(); applyZoom(0, current().Q); renderFoot(); if (activeTeams().some((t) => cur.picks[t.id] === undefined)) toast(`${I.flag} Zeit um! Wer noch nicht gerufen hat, sagt jetzt seine Antwort.`); return; }
+  if (kind === "zoom") { cur.stage = "entry"; cur.remaining = 0; save(); applyZoom(0, current().Q); renderFoot(); FX.callout("Zeit ist um!", { cls: "co-fire", sound: SFX.boom, shakeAmt: 12, hold: 500 }); if (activeTeams().some((t) => cur.picks[t.id] === undefined)) { const tk = renderToken; setTimeout(() => { if (tk === renderToken) toast(`${I.flag} Wer noch nicht gerufen hat, sagt jetzt seine Antwort.`); }, 1100); } return; }
   cur.stage = "entry"; cur.remaining = 0; save();
   await showCountdown(kind);
   if (game.cur === cur && cur.stage === "entry") renderFoot();
 }
 async function showCountdown(kind) {
-  const ov = document.createElement("div"); ov.className = "overlay";
   const head = kind === "est" ? "Stifte weg!" : "Zeit ist um!";
   const sub = kind === "est" ? "Zeigt eure Zettel" : kind === "tf" ? "Daumen hoch oder runter – auf drei" : "Antwort mit den Fingern zeigen – auf drei";
-  document.body.appendChild(ov);
-  if (reduced) { ov.innerHTML = `<div class="big"><p class="headline">${head}</p><p>${sub}</p></div>`; await sleep(1400); ov.remove(); return; }
-  const steps = ["1", "2", "3"];
-  for (const s of steps) { ov.innerHTML = `<div class="big"><p class="headline">${head}</p><p>${sub}</p><div class="count">${s}</div></div>`; Sound.count(false); await sleep(780); }
-  ov.innerHTML = `<div class="big"><p class="headline">${head}</p><p>${sub}</p><div class="count go">${kind === "est" ? "Hoch damit!" : "Zeigen!"}</div></div>`; Sound.count(true);
-  await sleep(1100); ov.remove();
+  if (reduced) { const ov = document.createElement("div"); ov.className = "overlay"; ov.innerHTML = `<div class="big"><p class="headline">${head}</p><p>${sub}</p></div>`; document.body.appendChild(ov); await sleep(1400); ov.remove(); return; }
+  const dim = document.createElement("div"); dim.className = "cdim"; document.body.appendChild(dim);
+  try {
+    if (!(await FX.callout(head, { sub, cls: "co-fire", sound: SFX.boom, shakeAmt: 16, hold: 650 }))) return;
+    for (const s of ["1", "2", "3"]) if (!(await FX.callout(s, { cls: "co-num", sound: () => { Sound.count(false); SFX.thud(); }, shakeAmt: 7, hold: 170 }))) return;
+    await FX.callout(kind === "est" ? "Hoch damit!" : "Zeigen!", { cls: "co-go", sound: () => { Sound.count(true); SFX.impact(); }, shakeAmt: 18, burst: true, hold: 650 });
+  } finally { dim.remove(); }
 }
 function stopTimeEarly() {
   if (!timer || !game.cur || game.cur.stage !== "run") return;
@@ -867,13 +912,13 @@ function pick(teamId, k) {
   } else if (cur.picks[teamId] === k) delete cur.picks[teamId];
   else cur.picks[teamId] = k;
   if (game.mode === "live" && cur.picks[teamId] !== undefined && cur.times[teamId] === undefined) cur.times[teamId] = timer ? clamp(1 - timer.remaining / timer.total, 0, 1) : 1;
-  Sound.click(); save(); paintPicks(); updateEntryState();
+  (cur.picks[teamId] !== undefined ? SFX.lockIn : Sound.click)(); save(); paintPicks(); updateEntryState();
   if (game.mode === "live") { updateLiveStatus(); broadcast(); if (cur.stage === "run" && activeTeams().every(answered)) { stopTimeEarly(); return; } }
   if (kind === "zoom" && cur.stage === "run" && activeTeams().every((t) => cur.picks[t.id] !== undefined)) { stopTimeEarly(); }
 }
 function toggleJoker(teamId) {
   const t = teamById(teamId); const cur = game.cur; if (!t || !t.joker || !cur || cur.stage === "revealed") return;
-  cur.jokers[teamId] = !cur.jokers[teamId]; Sound.click(); save(); paintPicks(); updateEntryState();
+  cur.jokers[teamId] = !cur.jokers[teamId]; (cur.jokers[teamId] ? SFX.whip : Sound.click)(); save(); paintPicks(); updateEntryState();
 }
 function parseNum(s) {
   s = String(s ?? "").trim().replace(/\s/g, ""); if (!s) return NaN;
@@ -915,13 +960,17 @@ async function reveal() {
   $("#revealbtn")?.setAttribute("disabled", "");
   finishTimerVisual();
   if (kind === "zoom") { const im = $("#zimg"); if (im) { im.style.transition = "transform 1.1s cubic-bezier(.2,.8,.2,1)"; im.style.transform = "translate(0%, 0%) scale(1)"; } const l = $("#zlens"); if (l) l.textContent = "Ganzes Bild"; }
-  Sound.drumroll(reduced ? 0.3 : 1.25);
-  await sleep(reduced ? 300 : 1300);
+  const prevLeader = leaderId();
+  await revealSuspense(kind);
+  if (game.cur !== cur) return;
   const gains = computeGains();
   for (const t of game.teams) { const d = gains[t.id] || 0; if (d) t.score = Math.max(BASE, t.score + d); }
   for (const id of Object.keys(cur.jokers)) if (cur.jokers[id] && cur.picks[id] !== undefined) { const t = teamById(id); if (t) t.joker = false; }
-  cur.gains = gains; cur.stage = "revealed"; save(); broadcast();
+  cur.gains = gains; cur.stage = "revealed";
+  const info = recordStats(kind, gains, cur);
+  save(); broadcast();
   renderRevealed(true);
+  revealFX(kind, gains, prevLeader, info);
 }
 function renderRevealed(animate) {
   const cur = game.cur; const { Q, kind } = current();
@@ -945,7 +994,7 @@ function renderRevealed(animate) {
     if (kind === "final") { const w = game.wagers?.[t.id] ?? 0; txt = d > 0 ? `+${fmt(d)} m` : d < 0 ? `−${fmt(-d)} m` : w ? "0 m" : "0 m"; cls = d > 0 ? "good" : d < 0 ? "neg" : "bad"; }
     else { txt = d > 0 ? `+${fmt(d)} m` : "0 m"; cls = d > 0 ? "good" : "bad"; }
     if (kind === "est") { const v = parseNum(cur.est[t.id]); if (Number.isFinite(v)) txt += ` · ${fmtNum(v)} ${Q.u}`; }
-    return `<span class="rchip" style="--tc:${teamColor(t)};--n:${n}"><img src="${avatarSrc(t)}" alt=""><span>${esc(t.name)}</span><b class="res ${cls}">${txt}</b></span>`;
+    return `<span class="rchip" data-team="${t.id}" style="--tc:${teamColor(t)};--n:${n}"><img src="${avatarSrc(t)}" alt=""><span>${esc(t.name)}</span><b class="res ${cls}">${txt}</b></span>`;
   }).join("");
   const isLastQ = game.i >= current().p.qs.length - 1;
   const nextLabel = game.phase === "question" && current().p.round === "final" ? (game.tiebreak ? "Zur Siegerehrung" : "Zum Gipfel-Höhenprofil") : isLastQ ? "Zum Höhenprofil" : "Nächste Frage";
@@ -954,11 +1003,8 @@ function renderRevealed(animate) {
   if (foot) foot.innerHTML = `<div class="fact"><span class="bulb">${I.bulb}</span>
       <div><p class="label">Wusstest du?</p><p class="t">${answerLine}${esc(Q.f)}</p><div class="results" style="margin-top:.6rem">${chips}</div></div>
       <button class="btn primary big" data-act="next" data-primary>${nextLabel} ${I.arrow}</button></div>`;
-  // top bar numbers
-  for (const t of game.teams) {
-    const el = $("#ts-" + t.id); if (!el) continue; const em = $("em", el); if (em) em.textContent = `${fmt(t.score)} m`;
-    const d = gains[t.id] || 0; if (animate && d) el.insertAdjacentHTML("beforeend", `<span class="plus ${d < 0 ? "neg" : ""}">${d > 0 ? "+" : "−"}${fmt(Math.abs(d))}</span>`);
-  }
+  // top bar numbers (when animating, the points fly up there first)
+  if (!animate) for (const t of game.teams) { const em = $(`#ts-${t.id} em`); if (em) em.textContent = `${fmt(t.score)} m`; }
 }
 function renderEstLine(Q) {
   const box = $("#estline"); if (!box) return;
@@ -974,7 +1020,7 @@ function renderEstLine(Q) {
   for (const x of sorted) { x.p = Math.max(pos(x.v), prev + 9); prev = x.p; }
   const over = prev - 100; if (over > 0) sorted.forEach((x) => (x.p -= over * (x.p / (prev || 1))));
   box.innerHTML = `<div class="estline"><div class="axis"></div>
-    ${sorted.map((x, n) => `<div class="pin ${gains[x.t.id] > 0 ? "win" : ""}" style="left:${clamp(x.p, 3, 97)}%;--tc:${teamColor(x.t)};--n:${n}"><img src="${avatarSrc(x.t)}" alt=""><span>${fmtNum(x.v)}</span></div>`).join("")}
+    ${sorted.map((x, n) => `<div class="pin ${gains[x.t.id] > 0 ? "win" : ""}" data-team="${x.t.id}" style="left:${clamp(x.p, 3, 97)}%;--tc:${teamColor(x.t)};--n:${n}"><img src="${avatarSrc(x.t)}" alt=""><span>${fmtNum(x.v)}</span></div>`).join("")}
     <div class="truth" style="left:${clamp(pos(Q.a), 4, 96)}%"><b>${fmtNum(Q.a)} ${esc(Q.u)}</b></div></div>`;
 }
 function nextStep() {
@@ -1000,7 +1046,7 @@ function viewBoard() {
     const d = t.score - (prev[t.id] ?? BASE);
     const nextCamp = CAMPS.find((c) => c.a > t.score);
     const camp = t.score > SUMMIT ? "Über dem Gipfel – im Ballon!" : t.score === SUMMIT ? "Auf dem Gipfel!" : `noch ${fmt(nextCamp.a - t.score)} m bis ${nextCamp.n}`;
-    return `<div class="rrow ${rank === 1 ? "first" : ""}" style="--tc:${teamColor(t)};--n:${n}"><span class="pos">${rank}</span><img src="${avatarSrc(t)}" alt=""><span class="nm"><b>${esc(t.name)}</b><span>${esc(t.members || animal(t.animal).de)} · ${esc(camp)}</span></span><span class="alt"><b data-count="${t.score}" data-from="${prev[t.id] ?? BASE}">${fmt(prev[t.id] ?? BASE)} m</b><span class="${d > 0 ? "" : d < 0 ? "neg" : "zero"}">${d > 0 ? "+" + fmt(d) : d < 0 ? "−" + fmt(-d) : "±0"} m</span></span></div>`;
+    return `<div class="rrow ${rank === 1 ? "first" : ""}" data-team="${t.id}" style="--tc:${teamColor(t)};--n:${n}"><span class="pos">${rank}</span><img src="${avatarSrc(t)}" alt=""><span class="nm"><b>${esc(t.name)}</b><span>${esc(t.members || animal(t.animal).de)} · ${esc(camp)}</span></span><span class="alt"><b data-count="${t.score}" data-from="${prev[t.id] ?? BASE}">${fmt(prev[t.id] ?? BASE)} m</b><span class="${d > 0 ? "" : d < 0 ? "neg" : "zero"}">${d > 0 ? "+" + fmt(d) : d < 0 ? "−" + fmt(-d) : "±0"} m</span></span></div>`;
   }).join("");
   const nextP = game.plan[game.r + 1];
   let btn;
@@ -1016,6 +1062,7 @@ function viewBoard() {
     <div class="board"><div class="mtn">${boardSVG(game.teams)}</div><div class="rank">${rows}<div class="board-foot">${btn}</div></div></div>
   </section>`);
   animateClimb(prev);
+  boardFX(prev);
 }
 function animateClimb(prev) {
   const n = game.teams.length;
@@ -1046,40 +1093,6 @@ function animateClimb(prev) {
     }
   };
   requestAnimationFrame(step);
-}
-
-/* ---------- Podium ---------- */
-function viewPodium() {
-  setScene("dim"); Sky.snow(true);
-  const list = ranked(game.teams);
-  const order = [list[1], list[0], list[2]].filter(Boolean);
-  const cols = order.map((x) => {
-    const place = x === list[0] ? 1 : x === list[1] ? 2 : 3;
-    const [c1, c2] = place === 1 ? [PAL.safran, PAL.udongo] : place === 2 ? [PAL.theluji, PAL.mawingu] : [PAL.udongo, PAL.safran];
-    return `<div class="pcol p${place}" style="--tc:${teamColor(x.t)}"><img class="pav" src="${avatarSrc(x.t)}" alt=""><span class="pn">${esc(x.t.name)}</span><span class="pm">${esc(x.t.members)}</span><span class="pa">${fmt(x.t.score)} m</span>
-      <div class="pblock" style="--c1:${c1};background-image:${kangaPattern(c1, c2)}"><span>${x.rank}</span></div></div>`;
-  }).join("");
-  const others = list.slice(3).map((x) => `<span class="rchip" style="--tc:${teamColor(x.t)};--n:0"><img src="${avatarSrc(x.t)}" alt=""><span>${x.rank}. ${esc(x.t.name)}</span><b>${fmt(x.t.score)} m</b></span>`).join("");
-  const winners = list.filter((x) => x.rank === 1).map((x) => x.t);
-  const w = winners[0];
-  const date = new Date().toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
-  const names = winners.map((t) => `<b>${esc(t.name)}</b>${t.members ? ` (${esc(t.members)})` : ""}`).join(" und ");
-  const height = w.score > SUMMIT ? `eine Höhe von <b>${fmt(w.score)} m</b> erreicht ${winners.length > 1 ? "haben" : "hat"} – sogar höher als der Uhuru Peak, das Dach Afrikas` : w.score === SUMMIT ? `den Uhuru Peak auf <b>5.895 m</b> erreicht ${winners.length > 1 ? "haben" : "hat"} – das Dach Afrikas` : `eine Höhe von <b>${fmt(w.score)} m</b> erreicht ${winners.length > 1 ? "haben" : "hat"} – nur noch ${fmt(SUMMIT - w.score)} m bis zum Uhuru Peak`;
-  mount(`<section class="screen podium-screen">
-    <header class="topbar" style="width:100%;justify-content:flex-end">${ctrls()}</header>
-    <div class="podium-head"><p class="eyebrow">Siegerehrung · Hongera!</p><h2>${winners.length > 1 ? "Gemeinsam ganz oben!" : `${esc(w.name)} steht ganz oben!`}</h2></div>
-    <div class="podium">${cols}</div>
-    ${others ? `<div class="others">${others}</div>` : ""}
-    <div class="podium-foot">
-      <div class="cert" style="background-image:${kangaPattern(PAL.safran, PAL.udongo)}"><div class="cert-in"><span class="seal">${I.peak}</span><div>
-        <h3>Gipfelurkunde</h3>
-        <p>Hiermit wird bestätigt, dass ${winners.length > 1 ? "die Seilschaften" : "die Seilschaft"} ${names} am <b>${date}</b> beim Gipfelquiz ${height}.</p>
-        <p class="hongera">Hongera! Herzlichen Glückwunsch!</p></div></div></div>
-      <div class="podium-actions"><button class="btn primary" data-act="again" data-primary>Neues Spiel ${I.arrow}</button><button class="btn" data-act="showBoard">Höhenprofil</button></div>
-    </div>
-  </section>`);
-  Sound.fanfare(); setTimeout(() => Confetti.fire(7), 300);
-  game.finished = true; store.del(SAVE_KEY);
 }
 
 /* =====================================================================
